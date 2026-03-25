@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import ray
@@ -26,10 +27,31 @@ class HotActorClient:
         namespace: str | None = None,
         address: str = "auto",
         ignore_reinit_error: bool = True,
+        wait_timeout_s: float = 30.0,
+        poll_interval_s: float = 0.5,
     ):
+        """Connect to a named Ray actor.
+
+        By default this waits briefly for the actor to appear, which makes
+        service clients more resilient to server startup time or a slow rebuild.
+        """
         ray.init(address=address, ignore_reinit_error=ignore_reinit_error)
-        handle = ray.get_actor(actor_name, namespace=namespace)
-        return cls(_actor=handle, name=actor_name)
+
+        deadline = None
+        if wait_timeout_s is not None and wait_timeout_s > 0:
+            deadline = time.monotonic() + wait_timeout_s
+
+        while True:
+            try:
+                handle = ray.get_actor(actor_name, namespace=namespace)
+                return cls(_actor=handle, name=actor_name)
+            except ValueError as exc:
+                if deadline is None or time.monotonic() >= deadline:
+                    namespace_note = f" in namespace {namespace!r}" if namespace is not None else ""
+                    raise RuntimeError(
+                        f"Timed out waiting for named actor {actor_name!r}{namespace_note}."
+                    ) from exc
+                time.sleep(poll_interval_s)
 
     def call(self, handler_name: str, *args, **kwargs) -> Any:
         return ray.get(self._actor.call.remote(handler_name, *args, **kwargs))
