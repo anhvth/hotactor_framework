@@ -13,6 +13,14 @@ The framework wraps the Ray actor internally and gives user code a Pythonic mode
 4. call handlers by name
 5. reload handlers without rebuilding the heavy state
 
+## Installation
+
+```bash
+git clone https://github.com/anhvth/hotactor_framework.git
+cd hotactor_framework
+pip install -e ./
+```
+
 ## Why this exists
 
 In a normal Ray actor, changing class methods often means recreating the actor. That is painful when the actor owns a large model. `hotactor` fixes that by keeping the actor process stable and moving the changeable logic into reloadable handler modules.
