@@ -134,6 +134,29 @@ status = teacher.status()
 teacher.reload_handlers()
 ```
 
+### 5. Run the Qwen example
+
+The Qwen example is split into a heavy server launcher and a lightweight client:
+
+```bash
+uv run examples/qwen_chat/server.py
+uv run examples/qwen_chat/client.py
+```
+
+The server owns the `HostedState` model load and the `launch_actor(...)` call.
+The server loads the `chat` handler from the client module, while `client.py` owns the interactive loop and the thin actor facade.
+
+### 6. Run the vLLM CPU example
+
+This example mirrors the same architecture. It defaults to a CPU transformers backend on this machine and can be switched to vLLM later in a compatible environment:
+
+```bash
+uv run --extra vllm-cpu examples/vllm_chat/server.py
+uv run --extra vllm-cpu examples/vllm_chat/client.py
+```
+
+Pass `--backend vllm` once `vllm` is installed in a compatible environment.
+
 ## Design rules
 
 - Keep the Ray-facing runtime stable.

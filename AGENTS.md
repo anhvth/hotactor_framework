@@ -1,333 +1,167 @@
-# hotactor canonical guide for coding agents
+# CLAUDE.md
 
-This document defines the **canonical style** for building services with `hotactor`.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Follow it exactly unless the surrounding codebase has a stronger existing convention.
+## Project Overview
 
-## The architectural rule
+`hotactor` is a framework for building long-lived Ray-hosted services with a clean separation between:
+- **heavy state**: models, policies, CUDA state, caches, distributed runtime objects (expensive to build)
+- **lightweight handlers**: forward, get_topk_logits, pre/post-processing (changeable and reloadable)
 
-Always separate code into two layers:
+## Development Commands
 
-### 1. long-lived state
-
-This is the expensive part that should stay up.
-
-Put it in a `HostedState` subclass.
-
-Examples:
-- `self.llm`
-- `self.policy`
-- distributed groups
-- tokenizers
-- caches
-- persistent counters
-- placement-group-aware objects
-
-### 2. lightweight handlers
-
-This is the changeable part that should be reloaded often.
-
-Put it in handler modules.
-
-Examples:
-- `forward`
-- `generate`
-- `prepare_for_lp_inference`
-- `get_topk_logits`
-- input normalization
-- output formatting
-- experimental branching logic
-
-Never bury changing business logic inside the state class.
-
-## Canonical directory layout
-
-Use this layout for every new service:
-
-```text
-my_service/
-  __init__.py
-  state.py
-  handlers.py
-  client.py              # optional, service-specific facade
-  tests/
-    test_handlers.py
-    test_state.py
+### Installation
+```bash
+pip install -e ./
 ```
 
-If the service has backend-specific logic, split handlers by backend:
+### Running the Example
+The Qwen chat example demonstrates the server/client architecture:
+```bash
+# Start the server (loads the model)
+uv run examples/qwen_chat/server.py
 
-```text
-my_service/
-  state.py
-  handlers_vllm.py
-  handlers_dtensor.py
+# Start the client (interactive chat interface)
+uv run examples/qwen_chat/client.py
 ```
 
-## Canonical state style
+### Testing
+No formal test suite exists. Testing should follow the patterns in AGENTS.md:
+- Test handlers against fake state objects (no Ray)
+- Test state class build/teardown/status separately
+- Add one integration test with Ray for end-to-end validation
 
-A state class must:
+## Architecture Overview
 
-- inherit from `HostedState`
-- own only long-lived resources and service-level counters
-- allocate heavy resources in `build()`
-- release them in `teardown()`
-- expose a small, serializable `status()` payload
+### Core Components
+1. **HostedState**: Base class for long-lived state
+   - Override `build()` to allocate heavy resources (models, tokenizers, caches)
+   - Override `teardown()` to release resources
+   - Override `status()` to return service status
+   - Access framework lifecycle via `self.host`
 
-### Example
+2. **@actor_handler decorator**: Marks functions as callable handlers
+   - First argument must be the state object
+   - Functions should be lightweight and avoid rebuilding resources
 
+3. **launch_actor()**: Creates the Ray actor and returns HotActorClient
+   - Named actors supported via `actor_name` and `namespace`
+   - Handler modules are reloaded without recreating the actor
+
+4. **HotActorClient**: Friendly wrapper for Ray actor operations
+   - `call()`: Synchronous handler calls
+   - `call_async()`: Asynchronous handler calls
+   - `reload_handlers()`: Reload handler modules
+   - `status()`: Get both framework and user status
+   - `shutdown()`: Clean shutdown
+
+### Directory Structure
+```
+hotactor/                    # Core framework
+├── __init__.py             # Main exports (lazy imports)
+├── launcher.py             # launch_actor, launch_or_replace_actor
+├── state.py                # HostedState base class
+├── registry.py             # @actor_handler decorator
+├── runtime.py              # Internal _HotActorRuntime
+├── client.py               # HotActorClient wrapper
+└── serving.py              # run_service_loop
+
+examples/                   # Working examples
+└── qwen_chat/             # Chat service with Qwen model
+    ├── server.py          # Model loading and actor launch
+    └── client.py          # Interactive client and chat handler
+```
+
+## Key Patterns
+
+### State Class Pattern
 ```python
-from hotactor import HostedState
-
-class TeacherState(HostedState):
-    def __init__(self, teacher_config, service_cfg, cluster_config=None):
+class MyServiceState(HostedState):
+    def __init__(self, config):
         super().__init__()
-        self.teacher_config = teacher_config
-        self.service_cfg = service_cfg
-        self.cluster_config = cluster_config
-        self.backend = teacher_config.get("service", {}).get("backend", "vllm")
-
-        self.llm = None
-        self.policy = None
-        self.inference_count = 0
-        self.last_inference_time_s = None
+        self.config = config
+        self.model = None
+        self.tokenizer = None
 
     def build(self):
-        if self.backend == "vllm":
-            self.llm = build_vllm(self.teacher_config, self.service_cfg)
+        # Load heavy resources here
+        self.model = load_model(self.config.model_path)
+        self.tokenizer = load_tokenizer()
 
     def teardown(self):
-        self.llm = None
-        self.policy = None
+        # Clean up resources
+        self.model = None
+        self.tokenizer = None
 
     def status(self):
         return {
-            "backend": self.backend,
-            "inference_count": self.inference_count,
-            "llm_loaded": self.llm is not None,
-            "policy_loaded": self.policy is not None,
+            "model_loaded": self.model is not None,
+            "inference_count": self.inference_count
         }
 ```
 
-## Canonical handler style
-
-A handler must:
-
-- be a plain function
-- accept `state` as the first argument
-- be decorated with `@actor_handler`
-- avoid owning lifecycle
-- avoid rebuilding heavy resources
-- do one service operation cleanly
-
-### Example
-
+### Handler Pattern
 ```python
 from hotactor import actor_handler
 
 @actor_handler
-def prepare_for_lp_inference(state):
-    state.host.set_state("ready")
-    if state.policy is not None:
-        state.policy.prepare_for_lp_inference()
+def forward(state, inputs):
+    # Use state.model, state.tokenizer but don't recreate them
+    return state.model.generate(inputs)
 
 @actor_handler
-def get_topk_logits(state, data, k, micro_batch_size=None):
-    state.inference_count += 1
-    return state.policy.get_topk_logits(data, k=k, micro_batch_size=micro_batch_size)
+def get_status(state):
+    return state.status()
 ```
 
-## What belongs where
-
-### Put this in `state.py`
-
-- model construction
-- policy construction
-- tokenizer loading
-- distributed setup
-- cache initialization
-- long-lived counters
-- service-wide configuration
-- teardown logic
-
-### Put this in `handlers.py`
-
-- `forward`
-- `generate`
-- `prepare_*`
-- `offload_*`
-- `get_topk_logits`
-- pre/post-processing
-- experimental feature flags
-- orchestration over already-live state
-
-## Naming conventions
-
-Use these names consistently.
-
-### State class
-
-Use `<ServiceName>State`.
-
-Examples:
-- `TeacherState`
-- `RewardModelState`
-- `RolloutState`
-
-### Handler module
-
-Use `handlers.py` for one backend or `handlers_<backend>.py` for multiple backends.
-
-Examples:
-- `handlers.py`
-- `handlers_vllm.py`
-- `handlers_dtensor.py`
-
-### Handler functions
-
-Use verb-first names that describe the operation.
-
-Good:
-- `forward`
-- `generate`
-- `prepare_for_lp_inference`
-- `get_topk_logits`
-- `offload_after_refit`
-
-Bad:
-- `do_it`
-- `main`
-- `service_logic`
-- `temp_handler`
-
-## Launch pattern
-
-This is the canonical launch pattern:
-
+### Launch Pattern
 ```python
-teacher = launch_actor(
-    name="teacher-service",
-    state_cls=TeacherState,
-    state_kwargs={
-        "teacher_config": teacher_config,
-        "service_cfg": service_cfg,
-        "cluster_config": cluster_config,
-    },
-    handler_modules=["my_service.handlers_vllm"],
+from hotactor import launch_actor
+
+service = launch_actor(
+    name="my-service",
+    state_cls=MyServiceState,
+    state_kwargs={"config": service_config},
+    handler_modules=["my_service.handlers"],
     ray_options={
         "num_cpus": 0,
         "num_gpus": 1,
         "max_concurrency": 4,
     },
-    actor_name="teacher-service",
-    namespace="prod",
-    get_if_exists=True,
+    actor_name="my-service",  # Optional named actor
+    namespace="prod",         # Optional namespace
+    get_if_exists=True,      # Reuse existing actor
 )
 ```
 
-## Client-side use
-
-Prefer named operations over reaching into raw Ray.
-
-Good:
-
+### Client Pattern
 ```python
-result = teacher.call("get_topk_logits", data, k=32)
-teacher.reload_handlers()
-status = teacher.status()
+# Using HotActorClient directly
+result = service.call("forward", {"text": "hello"})
+status = service.status()
+service.reload_handlers()
+
+# Subclassing for service-specific API
+class MyServiceClient(HotActorClient):
+    @classmethod
+    def connect(cls):
+        return cls.connect_named("my-service", namespace="prod")
+
+    def forward(self, text):
+        return self.call("forward", {"text": text})
 ```
 
-Avoid raw framework internals unless necessary.
+## Important Design Rules
 
-## Rule for reloading
+1. **Separation of Concerns**: Heavy state in HostedState, lightweight logic in handlers
+2. **No Handler Rebuilding**: Handlers should use existing state, not rebuild models
+3. **Named Actors**: Always use named actors for services that need to persist
+4. **Module Reloading**: Always reload handlers by module, not by string
+5. **Status Separation**: Framework status in `state.host`, domain status in `state.status()`
 
-Always reload by module:
+## Framework Internals
 
-```python
-teacher.reload_handlers()
-```
-
-Never register handlers from strings. Always define handlers in importable Python modules.
-
-## Service-specific facade pattern
-
-When the service has a stable public API, add a small facade class.
-
-### Example
-
-```python
-class TeacherClient:
-    def __init__(self, actor_client):
-        self._actor = actor_client
-
-    def prepare_for_lp_inference(self):
-        return self._actor.call("prepare_for_lp_inference")
-
-    def get_topk_logits(self, data, k, micro_batch_size=None):
-        return self._actor.call(
-            "get_topk_logits",
-            data,
-            k=k,
-            micro_batch_size=micro_batch_size,
-        )
-```
-
-Use this when you want stronger typing and a clear service contract.
-
-## Testing rules
-
-### test handlers without Ray when possible
-
-Handlers are plain functions, so test them against a fake state object first.
-
-### test state separately
-
-Test that `build()`, `status()`, and `teardown()` do the right thing.
-
-### add one integration test with Ray
-
-Have one end-to-end test that launches the actor and calls the main handler.
-
-## Anti-patterns
-
-Do not do these.
-
-### 1. heavy logic inside handlers that reconstructs the model
-
-Bad:
-
-```python
-@actor_handler
-def forward(state, inputs):
-    state.llm = build_llm(...)
-    return state.llm(inputs)
-```
-
-### 2. business logic buried in `build()`
-
-Bad:
-
-```python
-def build(self):
-    self.llm = build_llm(...)
-    self.cached_result = run_whole_pipeline(...)
-```
-
-`build()` should prepare resources, not run service operations.
-
-### 3. framework-level status mixed with domain status in confusing ways
-
-Keep host lifecycle on `state.host` and domain status in `status()`.
-
-### 4. giant handler modules with unrelated logic
-
-Split by backend or concern when the file grows large.
-
-## Canonical summary
-
-When writing code for `hotactor`, remember this sentence:
-
-> `HostedState` owns what is expensive to build; handlers define what the live service does.
-
-If a piece of code changes often, it belongs in a handler.
-If a piece of code is expensive to rebuild, it belongs on the state object.
+- The `_HotActorRuntime` class wraps the Ray actor and manages the HostedState instance
+- Handler modules are imported and reloaded using importlib
+- The actor maintains a reference to the HostedState and host lifecycle view
+- Ray actors are persistent while handlers can be reloaded without downtime

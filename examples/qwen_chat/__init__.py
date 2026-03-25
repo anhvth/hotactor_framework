@@ -1,0 +1,2 @@
+"""Qwen chat example package."""
+

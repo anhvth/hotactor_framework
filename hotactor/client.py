@@ -18,6 +18,19 @@ class HotActorClient:
     _actor: Any
     name: str
 
+    @classmethod
+    def connect_named(
+        cls,
+        actor_name: str,
+        *,
+        namespace: str | None = None,
+        address: str = "auto",
+        ignore_reinit_error: bool = True,
+    ):
+        ray.init(address=address, ignore_reinit_error=ignore_reinit_error)
+        handle = ray.get_actor(actor_name, namespace=namespace)
+        return cls(_actor=handle, name=actor_name)
+
     def call(self, handler_name: str, *args, **kwargs) -> Any:
         return ray.get(self._actor.call.remote(handler_name, *args, **kwargs))
 
