@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hotactor"
+version = "0.1.0"
+description = "Long-lived Ray-hosted state with reloadable Python handlers"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["ray"]
+
+[tool.setuptools]
+packages = ["hotactor"]
